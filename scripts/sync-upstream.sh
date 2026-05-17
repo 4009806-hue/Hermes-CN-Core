@@ -65,7 +65,7 @@ fi
 
 echo ""
 echo "Upstream commits since last sync:"
-git log --oneline "$BASE_BRANCH..$UPSTREAM_REMOTE/$BASE_BRANCH" | head -20
+git log --oneline --max-count=20 "$BASE_BRANCH..$UPSTREAM_REMOTE/$BASE_BRANCH"
 TOTAL_LINES="$(git log --oneline "$BASE_BRANCH..$UPSTREAM_REMOTE/$BASE_BRANCH" | wc -l | tr -d ' ')"
 if [[ "$TOTAL_LINES" -gt 20 ]]; then
   echo "... and $((TOTAL_LINES - 20)) more"
