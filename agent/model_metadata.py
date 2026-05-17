@@ -469,8 +469,6 @@ def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
 
     Returns one of: "ollama", "lm-studio", "vllm", "llamacpp", or None.
     """
-    import httpx
-
     normalized = _normalize_base_url(base_url)
     server_url = normalized
     if server_url.endswith("/v1"):
@@ -479,7 +477,9 @@ def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
     headers = _auth_headers(api_key)
 
     try:
-        with httpx.Client(timeout=2.0, headers=headers) as client:
+        from agent.httpx_clients import build_httpx_client
+
+        with build_httpx_client(timeout=2.0, headers=headers) as client:
             # LM Studio exposes /api/v1/models — check first (most specific)
             try:
                 r = client.get(f"{server_url}/api/v1/models")
@@ -984,8 +984,6 @@ def query_ollama_num_ctx(model: str, base_url: str, api_key: str = "") -> Option
     This is the value that should be passed as ``num_ctx`` in Ollama chat
     requests to override the default 2048.
     """
-    import httpx
-
     bare_model = _strip_provider_prefix(model)
     server_url = base_url.rstrip("/")
     if server_url.endswith("/v1"):
@@ -1001,7 +999,9 @@ def query_ollama_num_ctx(model: str, base_url: str, api_key: str = "") -> Option
     headers = _auth_headers(api_key)
 
     try:
-        with httpx.Client(timeout=3.0, headers=headers) as client:
+        from agent.httpx_clients import build_httpx_client
+
+        with build_httpx_client(timeout=3.0, headers=headers) as client:
             resp = client.post(f"{server_url}/api/show", json={"name": bare_model})
             if resp.status_code != 200:
                 return None
@@ -1048,8 +1048,6 @@ def _query_ollama_api_show(model: str, base_url: str, api_key: str = "") -> Opti
     The order is flipped vs ``query_ollama_num_ctx()`` because local users
     control ``num_ctx`` themselves; hosted users can't.
     """
-    import httpx
-
     server_url = base_url.rstrip("/")
     if server_url.endswith("/v1"):
         server_url = server_url[:-3]
@@ -1057,7 +1055,9 @@ def _query_ollama_api_show(model: str, base_url: str, api_key: str = "") -> Opti
     headers = _auth_headers(api_key)
 
     try:
-        with httpx.Client(timeout=5.0, headers=headers) as client:
+        from agent.httpx_clients import build_httpx_client
+
+        with build_httpx_client(timeout=5.0, headers=headers) as client:
             resp = client.post(f"{server_url}/api/show", json={"name": model})
             if resp.status_code != 200:
                 return None
@@ -1104,7 +1104,6 @@ def _model_name_suggests_kimi(model: str) -> bool:
 
 def _query_local_context_length(model: str, base_url: str, api_key: str = "") -> Optional[int]:
     """Query a local server for the model's context length."""
-    import httpx
 
     # Strip recognised provider prefix (e.g., "local:model-name" → "model-name").
     # Ollama "model:tag" colons (e.g. "qwen3.5:27b") are intentionally preserved.
@@ -1123,7 +1122,9 @@ def _query_local_context_length(model: str, base_url: str, api_key: str = "") ->
         server_type = None
 
     try:
-        with httpx.Client(timeout=3.0, headers=headers) as client:
+        from agent.httpx_clients import build_httpx_client
+
+        with build_httpx_client(timeout=3.0, headers=headers) as client:
             # Ollama: /api/show returns model details with context info
             if server_type == "ollama":
                 resp = client.post(f"{server_url}/api/show", json={"name": model})
@@ -1662,7 +1663,14 @@ def get_model_context_length(
     # For non-Ollama servers (OpenAI, Anthropic, etc.), the POST returns
     # 404/405 quickly.  Results are cached, so the hit is per-model+URL,
     # once per hour.
-    if base_url:
+    _should_probe_ollama_native = (
+        bool(base_url)
+        and (
+            effective_provider in {"", "custom", "local", "ollama", "ollama-cloud"}
+            or not _is_known_provider_base_url(base_url)
+        )
+    )
+    if _should_probe_ollama_native:
         ctx = _query_ollama_api_show(model, base_url, api_key=api_key)
         if ctx is not None:
             save_context_length(model, base_url, ctx)
