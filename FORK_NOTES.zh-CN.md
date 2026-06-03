@@ -196,3 +196,66 @@
 **风险和约束**：`provider.probe` 不应返回密钥、原始配置或敏感错误细节。
 
 **是否上游**：可以考虑，但需要先审定 probe 的返回结构和错误语义。
+
+---
+
+## Windows 兼容性补丁
+
+以下补丁由 Maxwell Geng 贡献，用于提升 Windows 平台的一等支持体验，均可向上游提交。
+
+### `282cfeeca` — 为 `shlex.split` 增加 `posix` 选项以兼容 Windows
+
+**做了什么**：在代码库所有涉及到 `subprocess` 的 `shlex.split()` 调用中增加 `posix=os.name == "posix"` 参数，防止 Windows 路径中的反斜杠被误解析为转义字符。
+
+**涉及文件**：
+- `agent/copilot_acp_client.py`
+- `agent/shell_hooks.py`
+- `agent/subdirectory_hints.py`
+- `cli.py`
+- `gateway/run.py`
+- `hermes_cli/auth.py`
+- `hermes_cli/gateway_windows.py`
+- `hermes_cli/memory_setup.py`
+- `tools/transcription_tools.py`
+
+**上游状态**：建议上游。纯 Windows bug 修复，POSIX 下行为无变化。
+
+### `ada59ec36` — 修复 10 个在 Windows 上失败的测试，使其跨平台
+
+**做了什么**：让 10 个测试用例在 Windows 上正确通过或优雅跳过：
+
+| 测试 | 修复方式 |
+|---|---|
+| `test_make_run_env_appends_homebrew_on_minimal_path` | Windows 下跳过（POSIX PATH 注入在该平台被有意跳过）。 |
+| `test_returns_root_when_only_root_exists` | Windows 下对 cwd 做 `os.path.normpath()`，使带正斜杠的路径能正确走到文件系统根目录。 |
+| `test_close_stdin_allows_eof_driven_process_to_finish` | 用 `cat` 代替 `python3`；PTY 库缺失时跳过；winpty 传 `str`、ptyprocess 传 `bytes`。 |
+| `test_popen_killed_when_thread_creation_fails` | 仅在 `os.getpgid` 存在时（POSIX）patch。 |
+| `test_popen_killed_when_write_checkpoint_fails` | 仅在 `os.getpgid` 存在时（POSIX）patch。 |
+| `test_kill_detached_session_uses_host_pid` | 直接 mock `_terminate_host_pid`，不再依赖内部 `psutil` 调用。 |
+| `test_windows_does_not_call_psutil` | 增加 `pytest.importorskip("psutil")`。 |
+| `test_posix_walks_tree_and_terminates_children_then_parent` | 增加 `pytest.importorskip("psutil")`。 |
+| `test_posix_no_such_process_swallowed` | 增加 `pytest.importorskip("psutil")`。 |
+| `test_posix_oserror_falls_back_to_os_kill` | 增加 `pytest.importorskip("psutil")`。 |
+
+**涉及文件**：
+- `tests/tools/test_local_env_blocklist.py`
+- `tests/tools/test_process_registry.py`
+- `tools/environments/local.py`
+- `tools/process_registry.py`
+
+**上游状态**：建议上游。扩展 CI 到 Windows 覆盖，不改变生产行为。
+
+### `1a75a7672` — Windows 下自动安装 Git-Bash，并将 Windows 风格命令转换为 POSIX 风格
+
+**做了什么**：
+1. **自动安装 Git for Windows**：当本地终端后端找不到可用的 `bash.exe` 时，按优先级尝试：Chocolatey、Scoop、PortableGit 自解压包、官方安装程序静默安装。安装成功后将目录写入用户 PATH 注册表项。
+2. **Windows 命令转 POSIX**：在将命令发送给 bash 前，把 Windows 风格命令转换为 POSIX 风格。包括盘符路径（`C:\foo` → `/c/foo`）、反斜杠目录分隔符、Windows 特有引号/转义规则以及常见 Windows 专用语法。
+
+**新增文件**：
+- `tools/environments/_install_git.py` — Windows 下 Git 的下载与安装策略。
+- `tools/environments/_process_bash_command.py` — Windows 到 POSIX 的命令翻译。
+
+**涉及文件**：
+- `tools/environments/local.py` — 在本地环境后端中集成自动安装和命令转换逻辑。
+
+**上游状态**：建议上游。让 terminal 工具链在 Windows 上开箱即用，无需手动安装 Git。
