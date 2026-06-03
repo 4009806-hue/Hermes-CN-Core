@@ -58,6 +58,8 @@ def _resolve_safe_cwd(cwd: str) -> str:
     terminal call until the gateway restarts.
     """
     cwd = _msys_to_windows_path(cwd) if _IS_WINDOWS else cwd
+    if _IS_WINDOWS and cwd:
+        cwd = os.path.normpath(cwd)
     if cwd and os.path.isdir(cwd):
         return cwd
     parent = os.path.dirname(cwd) if cwd else ""
