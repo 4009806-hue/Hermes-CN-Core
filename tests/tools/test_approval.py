@@ -29,6 +29,20 @@ class TestApprovalModeParsing:
         with mock_patch("hermes_cli.config.load_config", return_value={"approvals": {"mode": "off"}}):
             assert _get_approval_mode() == "off"
 
+    def test_legacy_schema_aliases_normalize_to_canonical_modes(self):
+        cases = {
+            "manual": "manual",
+            "ask": "manual",
+            "default": "manual",
+            "deny": "manual",
+            "smart": "smart",
+            "off": "off",
+            "yolo": "off",
+        }
+        for raw, expected in cases.items():
+            with mock_patch("hermes_cli.config.load_config", return_value={"approvals": {"mode": raw}}):
+                assert _get_approval_mode() == expected
+
 
 class TestSmartApproval:
     def test_smart_approval_uses_call_llm(self):

@@ -894,6 +894,10 @@ def _normalize_approval_mode(mode) -> str:
         return "off" if mode is False else "manual"
     if isinstance(mode, str):
         normalized = mode.strip().lower()
+        if normalized in {"", "manual", "ask", "default", "deny"}:
+            return "manual"
+        if normalized in {"off", "yolo"}:
+            return "off"
         return normalized or "manual"
     return "manual"
 
