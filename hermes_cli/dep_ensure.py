@@ -31,14 +31,14 @@ _DEP_CHECKS = {
         or _has_system_browser()
         or _has_hermes_agent_browser()
     ),
-    "ripgrep": lambda: shutil.which("rg") is not None,
+    "ripgrep": lambda: shutil.which("rg") is not None and _has_ripgrepy(),
     "ffmpeg": lambda: shutil.which("ffmpeg") is not None,
 }
 
 _DEP_DESCRIPTIONS = {
     "node": "Node.js (required for browser tools and TUI)",
     "browser": "Browser engine (Chromium, for web browsing tools)",
-    "ripgrep": "ripgrep (fast file search)",
+    "ripgrep": "ripgrep + ripgrepy (fast file search)",
     "ffmpeg": "ffmpeg (TTS voice messages)",
 }
 
@@ -52,6 +52,14 @@ def _has_system_browser() -> bool:
         if shutil.which(name):
             return True
     return False
+
+
+def _has_ripgrepy() -> bool:
+    try:
+        import ripgrepy
+        return True
+    except Exception:
+        return False
 
 
 def _has_hermes_agent_browser() -> bool:
