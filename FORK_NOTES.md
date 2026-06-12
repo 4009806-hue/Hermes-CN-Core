@@ -25,11 +25,47 @@ This document explains the fork-specific changes on `main` that diverge from ups
 | **P-017** | `agent/tool_dedup.py`, `agent/agent_init.py`, `agent/conversation_loop.py`, `agent/tool_executor.py` | Adds `ToolDedupTracker` that detects consecutive identical tool calls across API iterations and injects escalating reminders (`<system-reminder>`) at repeat counts 3, 5, and 8 to break infinite loops | Agent on complex tasks can enter infinite loops calling the same tool with the same arguments repeatedly — the existing same-turn dedup (`_deduplicate_tool_calls`) doesn't catch this cross-iteration pattern | Internal — addresses a behavioral robustness gap; the mechanism is generic but integration points are fork-specific |
 | **P-018** | `agent/agent_init.py`, `tests/run_agent/test_init_fallback_on_exhausted_pool.py` | Adds `_api_key_required` helper and empty-key guards before OpenAI / Anthropic SDK client construction. Raises `RuntimeError: no API key (param empty, env vars unset)` instead of letting a low-level SDK auth exception bubble up | Empty key (param empty, env vars unset) previously triggered confusing low-level SDK exceptions that looked like panics, especially in TUI/gateway background threads where stack traces are not surfaced to the user | Should be upstreamed |
 | **P-020** | `tools/environments/windows_env.py` (new), `tools/environments/local.py`, `hermes_cli/claw.py`, `hermes_cli/managed_uv.py`, `hermes_cli/gateway.py`, `hermes_cli/dep_ensure.py`, `hermes_cli/clipboard.py`, `skills/creative/comfyui/scripts/hardware_check.py` | Adds `refresh_env_from_registry()` that refreshes `os.environ["PATH"]` and `os.environ["PATHEXT"]` from the Windows Registry (HKLM + HKCU) before every PowerShell subprocess invocation, so tools installed since process start (WinGet, MSI, etc.) are discoverable. Mirrors the pattern from `kimi-cli/src/kimi_cli/utils/environment.py`. No-op on non-Windows. | Without this, the agent cannot discover binaries installed (e.g. via WinGet) after its process started — `shutil.which` and `subprocess.Popen` only see the PATH that was captured at process creation. This is especially painful when the agent installs its own deps (node, uv, ...) during a session. | Should be upstreamed |
+| **P-021** | `gateway/run.py`, `cron/scheduler.py`, `cron/jobs.py`, `hermes_time.py` | Four root-cause fixes for "cron silently stops firing": (1) wrap `_start_cron_ticker` imports + init in try/except to prevent silent daemon thread death; (2) stale `.tick.lock` auto-cleanup — if lock mtime exceeds `lock_stale_seconds` (120s default), delete zombie lock; (3) `_validate_cron_startup()` before starting ticker — rejects corrupt `jobs.json` early instead of crashing the thread; (4) `_ensure_aware` interprets naive datetimes in configured Hermes timezone (not system-local); fixed broken `def now()` in `hermes_time.py`; `reset_cache()` called at each tick for hot TZ config reload. | Corrupt `jobs.json` → `RuntimeError` in ticker thread → daemon dies silently. Zombie `.tick.lock` from crashed process → all future ticks blocked forever. Uncaught `ImportError` in ticker init → thread dies with zero log. Server TZ ≠ config TZ → all scheduled times silently drift. | Should be upstreamed (generic reliability fixes) |
 
 > **P-001** (provider dict-vs-list mismatch in `tui_gateway/server.py`) — **dropped from this fork**. Upstream has since fixed it; the line `user_provs = cfg.get("providers")` in `_apply_model_switch` already does the right thing.
+---
+
+### P-021: Cron scheduler reliability fixes — prevent silent failures
+
+**Symptom**: Cron jobs stop firing silently with no error visible at default log levels. The gateway is running and healthy, but `hermes cron list` shows jobs accumulating with stale `next_run_at`.
+
+**Root cause**: Four independent failure modes, each fatal on its own:
+
+1. **Daemon thread silent death** (`gateway/run.py` `_start_cron_ticker`): The imports at the top of the ticker thread (`from cron.scheduler import tick`, etc.) are outside any try/except. An `ImportError` (missing dep, broken `.pyc`, disk full) kills the daemon thread with zero log output — the gateway keeps running but cron is dead.
+
+2. **Zombie lock file** (`cron/scheduler.py` `tick()`): `.tick.lock` is acquired via `fcntl.flock`/`msvcrt.locking` and released in a `finally` block. If the process is `SIGKILL`-ed or suffers a kernel panic, the lock file is never cleaned. The next process sees the lock as held and silently returns 0 from `tick()` — forever.
+
+3. **Corrupt `jobs.json` crashes the ticker** (`gateway/run.py`): If `jobs.json` is corrupted (truncated write, bad merge, disk error), `load_jobs()` raises `RuntimeError`. This exception propagates inside `tick()` → caught by `logger.debug` → invisible in production. But worse: if the crash happens during the first tick, the entire ticker thread dies before producing any output.
+
+4. **Timezone interpretation drift** (`cron/jobs.py` `_ensure_aware`): Legacy naive datetimes (stored without timezone offset) were interpreted as *system-local* time via `datetime.now().astimezone().tzinfo`. If the server's system timezone differs from the configured Hermes timezone, all scheduled times silently shift — sometimes by hours.
+
+Also fixed a pre-existing bug in `hermes_time.py` where `def now():` was missing (its body was appended to `reset_cache()`'s docstring), making the `now()` function unreachable.
+
+**What the patch does**:
+
+| Fix | File | Change |
+|------|------|--------|
+| F-1 | `gateway/run.py` | Wrap `from cron.scheduler import tick` + all init imports in try/except → `logger.error` + `return`. Upgrade tick exception log from `debug` to `warning`. |
+| F-3 | `cron/scheduler.py` | Before acquiring `.tick.lock`, check the file's mtime. If older than `lock_stale_seconds` (120s default, configurable via `cron.lock_stale_seconds` in `config.yaml`), treat it as a zombie → `logger.warning` + delete. |
+| F-4 | `gateway/run.py` | Add `_validate_cron_startup()`: reads `jobs.json` and checks `croniter` before starting the ticker thread. Corrupt JSON → `logger.error` → cron ticker not started (gateway continues). Missing `croniter` → `logger.warning` (non-fatal, interval/timestamp jobs still work). |
+| F-5 | `cron/jobs.py` | `_ensure_aware` now uses `_hermes_now().tzinfo` (configured timezone) instead of `datetime.now().astimezone().tzinfo` (system-local) for naive datetimes. Logs a warning when encountering legacy naive data. `parse_schedule` display now includes timezone (e.g. `"once at 2026-06-01 09:00 UTC+08:00"`). |
+| F-7 | `hermes_time.py`, `cron/scheduler.py` | Fixed broken `def now():`. `reset_cache()` called at the start of each `tick()` so timezone config changes take effect without a gateway restart. |
+
+**Side effects**:
+- `cron.lock_stale_seconds` is a new optional config key (default 120s). If unset, the stale-lock threshold defaults to 120s.
+- `_ensure_aware` now emits a `logger.warning` once per naive datetime encountered. Users with legacy jobs should re-save them to store timezone-aware timestamps.
+- The ticker now logs at WARNING level for unhandled exceptions, which may increase log volume if there is a persistent broken state (but the broken state is now visible instead of silent).
+
+**Should we upstream?** Yes. These are generic reliability fixes that affect every Hermes deployment, regardless of platform or provider. The stale-lock recovery alone prevents a class of "cron mysteriously stopped" support tickets.
+
+---
 
 ## Release/support changes
-
 These are fork maintenance changes, not runtime behavior patches:
 
 | Area | Target file | What it does |

@@ -28,6 +28,7 @@
 | **P-017** | `agent/tool_dedup.py`, `agent/agent_init.py`, `agent/conversation_loop.py`, `agent/tool_executor.py` | 增加 `ToolDedupTracker`，在跨 API 迭代间检测重复的相同工具调用，并在重复次数达到 3、5、8 次时注入逐级升级的 `<system-reminder>` 提示以打破无限循环 | Agent 在处理复杂任务时可能陷入无限循环，反复调用相同工具和参数——现有同轮去重 `_deduplicate_tool_calls` 无法检测跨迭代模式 | 内部机制——解决行为健壮性缺口；机制通用，但集成点与 fork 架构耦合 |
 | **P-018** | `agent/agent_init.py`, `tests/run_agent/test_init_fallback_on_exhausted_pool.py` | 增加 `_api_key_required` 辅助函数，并在 OpenAI / Anthropic SDK 客户端构造前加入空 key 保护；当 api_key 为空且 provider 需要密钥时，抛出 `RuntimeError: no API key (param empty, env vars unset)` | 此前空 key（参数为空且环境变量未设置）会触发底层 SDK 认证异常，在 TUI/gateway 后台线程中表现为 panic 且无堆栈信息 | 建议上游 |
 | **P-020** | `tools/environments/windows_env.py`（新建）, `tools/environments/local.py`, `hermes_cli/claw.py`, `hermes_cli/managed_uv.py`, `hermes_cli/gateway.py`, `hermes_cli/dep_ensure.py`, `hermes_cli/clipboard.py`, `skills/creative/comfyui/scripts/hardware_check.py` | 新增 `refresh_env_from_registry()` 函数，从 Windows 注册表（HKLM + HKCU）刷新 `os.environ["PATH"]` 和 `os.environ["PATHEXT"]`，在每次 PowerShell 子进程调用前执行，使进程启动后安装的工具（如 WinGet、MSI）可被发现。参考 `kimi-cli/src/kimi_cli/utils/environment.py` 的实现。非 Windows 平台无操作。 | 如果不刷新，agent 无法发现进程启动后安装的二进制文件（例如通过 WinGet 安装的工具）— `shutil.which` 和 `subprocess.Popen` 只能看到进程创建时捕获的 PATH。当 agent 在会话中安装自己的依赖（node、uv 等）时尤其痛苦。 | 建议上游 |
+| **P-021** | `gateway/run.py`、`cron/scheduler.py`、`cron/jobs.py`、`hermes_time.py` | 四项 cron "静默停摆" 根因修复：(1) `_start_cron_ticker` 初始化包在 try/except 中，防止 daemon 线程静默死亡；(2) 僵尸 `.tick.lock` 自动清理——锁文件 mtime 超过 `lock_stale_seconds`（默认 120s）则删除；(3) `_validate_cron_startup()` 启动前校验 `jobs.json` 可解析性；(4) `_ensure_aware` 按配置时区解释无时区时间戳；修复 `hermes_time.py` 缺失的 `def now()`；每次 tick 调用 `reset_cache()` 使时区配置热生效。 | `jobs.json` 损坏 → ticker 线程崩溃 → daemon 静默死亡。僵尸 `.tick.lock` → 所有后续 tick 永久阻塞。ticker 初始化 `ImportError` → 线程零日志死亡。服务器时区 ≠ 配置时区 → 调度时间静默偏移。 | 建议上游 |
 
 ## 发布和维护支撑
 
@@ -400,6 +401,25 @@
 **风险和约束**：对真正不需要密钥的 provider（本地端点 `"no-key-required"`、Bedrock、Azure Entra ID）无影响。fallback 循环（`fallback_model` / `fallback_providers`）仍在保护之前执行。
 
 **是否上游**：建议上游。改动纯增量、与 provider 无关，能同时改善 CLI、TUI、gateway 和直接 `AIAgent()` 调用的用户体验。
+
+---
+
+### P-021：Cron 调度器可靠性修复 — 防止静默停摆
+
+**现象**：定时任务在默认日志级别下无任何错误提示就停止执行。Gateway 仍在运行且健康，但 `hermes cron list` 显示任务的 `next_run_at` 已过期却一直不触发。
+
+**根因**：四个相互独立的故障模式：
+
+1. **Daemon 线程静默死亡** — ticker 线程顶部的导入语句在 try/except 之外，`ImportError` 会直接杀死 daemon 线程且零日志。
+2. **僵尸锁文件** — 进程被 `SIGKILL` 或内核 panic 后 `.tick.lock` 永不清理，后续进程永远获取不到锁。
+3. **损坏的 `jobs.json`** — 首次 tick 中 `load_jobs()` 抛 `RuntimeError`，线程在产生任何输出前死亡。
+4. **时区解释漂移** — 旧的无时区时间戳按系统本地时间解释，与配置时区不一致时所有调度时间静默偏移。
+
+同时修复了 `hermes_time.py` 中 `def now():` 缺失的既有 bug。
+
+**改动**：`gateway/run.py`（F-1/F-4）、`cron/scheduler.py`（F-3/F-7）、`cron/jobs.py`（F-5）、`hermes_time.py`（F-7）。详见英文版 Fork Notes。
+
+**是否上游**：建议上游。通用可靠性修复，与平台和 provider 无关。
 
 ---
 

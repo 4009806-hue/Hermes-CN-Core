@@ -235,6 +235,26 @@ def _get_lock_paths() -> tuple[Path, Path]:
     return lock_dir, lock_dir / ".tick.lock"
 
 
+def _get_lock_stale_seconds() -> float:
+    """Return the configured stale-lock threshold in seconds (F-3).
+
+    If the lock file hasn't been modified in this many seconds, it is
+    considered a zombie lock from a crashed process and can be forcibly
+    released.  Default: 120s (2× cron interval).
+    """
+    try:
+        cfg = load_config() or {}
+        cron_cfg = cfg.get("cron", {}) if isinstance(cfg, dict) else {}
+        configured = cron_cfg.get("lock_stale_seconds")
+        if configured is not None:
+            val = int(float(configured))
+            if val > 0:
+                return float(val)
+    except Exception:
+        pass
+    return 120.0
+
+
 @contextmanager
 def _job_profile_context(job_id: str, profile: Optional[str]):
     """Temporarily run a job under a specific Hermes profile.
@@ -1974,6 +1994,37 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
     """
     lock_dir, lock_file = _get_lock_paths()
     lock_dir.mkdir(parents=True, exist_ok=True)
+
+    # Refresh timezone cache so config changes take effect without a
+    # gateway restart (F-7).
+    try:
+        from hermes_time import reset_cache as _reset_tz_cache
+        _reset_tz_cache()
+    except Exception:
+        pass
+
+    # --- Stale-lock detection (F-3): if the lock file exists and hasn't
+    # been modified in > lock_stale_seconds, the previous holder is assumed
+    # to have crashed.  Force-delete the lock so the new process can proceed
+    # without manual intervention. ---
+    lock_stale = _get_lock_stale_seconds()
+    if lock_file.exists():
+        try:
+            import time as _time
+            mtime = lock_file.stat().st_mtime
+            age = _time.time() - mtime
+            if age > lock_stale:
+                logger.warning(
+                    "Removing stale cron lock file (age=%.0fs, threshold=%.0fs). "
+                    "Previous holder likely crashed.",
+                    age, lock_stale,
+                )
+                try:
+                    lock_file.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
     # Cross-platform file locking: fcntl on Unix, msvcrt on Windows
     lock_fd = None

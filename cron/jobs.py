@@ -264,12 +264,14 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
             dt = datetime.fromisoformat(schedule.replace('Z', '+00:00'))
             # Make naive timestamps timezone-aware at parse time so the stored
             # value doesn't depend on the system timezone matching at check time.
+            # (F-5): Interpret naive timestamps in the configured Hermes timezone.
             if dt.tzinfo is None:
-                dt = dt.astimezone()  # Interpret as local timezone
+                dt = dt.replace(tzinfo=_hermes_now().tzinfo)
+            tz_display = dt.strftime('%Z')
             return {
                 "kind": "once",
                 "run_at": dt.isoformat(),
-                "display": f"once at {dt.strftime('%Y-%m-%d %H:%M')}"
+                "display": f"once at {dt.strftime('%Y-%m-%d %H:%M')} {tz_display}"
             }
         except ValueError as e:
             raise ValueError(f"Invalid timestamp '{schedule}': {e}")
@@ -298,19 +300,29 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
 def _ensure_aware(dt: datetime) -> datetime:
     """Return a timezone-aware datetime in Hermes configured timezone.
 
-    Backward compatibility:
+    Backward compatibility (F-5):
     - Older stored timestamps may be naive.
-    - Naive values are interpreted as *system-local wall time* (the timezone
-      `datetime.now()` used when they were created), then converted to the
+    - Naive values are now interpreted as belonging to the **configured Hermes
+      timezone** (via ``_hermes_now().tzinfo``), NOT the system local time.
+      Previously naive timestamps were interpreted as system local time, which
+      could cause silent offsets when the server timezone differed from the
       configured Hermes timezone.
+    - A warning is logged when encountering naive datetimes (indicating legacy
+      data) to prompt migration.
 
     This preserves relative ordering for legacy naive timestamps across
     timezone changes and avoids false not-due results.
     """
     target_tz = _hermes_now().tzinfo
     if dt.tzinfo is None:
-        local_tz = datetime.now().astimezone().tzinfo
-        return dt.replace(tzinfo=local_tz).astimezone(target_tz)
+        logger.warning(
+            "Encountered naive datetime %s in cron data — treating as "
+            "configured timezone (%s). Consider migrating old jobs to "
+            "store timezone-aware timestamps.",
+            dt.isoformat(),
+            target_tz,
+        )
+        return dt.replace(tzinfo=target_tz)
     return dt.astimezone(target_tz)
 
 
