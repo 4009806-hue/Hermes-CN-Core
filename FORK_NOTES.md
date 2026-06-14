@@ -26,6 +26,7 @@ This document explains the fork-specific changes on `main` that diverge from ups
 | **P-018** | `agent/agent_init.py`, `tests/run_agent/test_init_fallback_on_exhausted_pool.py` | Adds `_api_key_required` helper and empty-key guards before OpenAI / Anthropic SDK client construction. Raises `RuntimeError: no API key (param empty, env vars unset)` instead of letting a low-level SDK auth exception bubble up | Empty key (param empty, env vars unset) previously triggered confusing low-level SDK exceptions that looked like panics, especially in TUI/gateway background threads where stack traces are not surfaced to the user | Should be upstreamed |
 | **P-020** | `tools/environments/windows_env.py` (new), `tools/environments/local.py`, `hermes_cli/claw.py`, `hermes_cli/managed_uv.py`, `hermes_cli/gateway.py`, `hermes_cli/dep_ensure.py`, `hermes_cli/clipboard.py`, `skills/creative/comfyui/scripts/hardware_check.py` | Adds `refresh_env_from_registry()` that refreshes `os.environ["PATH"]` and `os.environ["PATHEXT"]` from the Windows Registry (HKLM + HKCU) before every PowerShell subprocess invocation, so tools installed since process start (WinGet, MSI, etc.) are discoverable. Mirrors the pattern from `kimi-cli/src/kimi_cli/utils/environment.py`. No-op on non-Windows. | Without this, the agent cannot discover binaries installed (e.g. via WinGet) after its process started — `shutil.which` and `subprocess.Popen` only see the PATH that was captured at process creation. This is especially painful when the agent installs its own deps (node, uv, ...) during a session. | Should be upstreamed |
 | **P-021** | `gateway/run.py`, `cron/scheduler.py`, `cron/jobs.py`, `hermes_time.py` | Four root-cause fixes for "cron silently stops firing": (1) wrap `_start_cron_ticker` imports + init in try/except to prevent silent daemon thread death; (2) stale `.tick.lock` auto-cleanup — delete the lock only when its mtime exceeds `lock_stale_seconds` (120s default) AND the PID it records is no longer alive, so a live holder running a long job is never stolen from; (3) `_validate_cron_startup()` before starting ticker — rejects corrupt `jobs.json` early instead of crashing the thread; (4) `_ensure_aware` interprets naive legacy datetimes as system-local wall time to preserve their absolute instant (issue #806); fixed broken `def now()` in `hermes_time.py`; `reset_cache()` called at each tick for hot TZ config reload. | Corrupt `jobs.json` → `RuntimeError` in ticker thread → daemon dies silently. Zombie `.tick.lock` from crashed process → all future ticks blocked forever. Uncaught `ImportError` in ticker init → thread dies with zero log. Server TZ ≠ config TZ → all scheduled times silently drift. | Should be upstreamed (generic reliability fixes) |
+| **P-022** | `agent/agent_runtime_helpers.py`, `tests/run_agent/test_agent_guardrails.py`, `tests/run_agent/test_session_meta_filtering.py` | Adds empty-content filtering to `sanitize_api_messages`: drops `assistant`/`user`/`function` messages whose `content` is `""` and that carry no payload, while preserving assistant messages that still have `tool_calls`, `codex_reasoning_items`, `codex_message_items`, or `reasoning_content`. | MiMo v2.5 and strict OpenAI-compatible gateways reject messages with empty `content` (HTTP 400 / "text is not set"). Long sessions (e.g. Feishu 3-13h) can leave such messages behind after context compression/truncation. | Should be upstreamed |
 
 > **P-001** (provider dict-vs-list mismatch in `tui_gateway/server.py`) — **dropped from this fork**. Upstream has since fixed it; the line `user_provs = cfg.get("providers")` in `_apply_model_switch` already does the right thing.
 ---
@@ -458,6 +459,37 @@ opening an upstream PR.
 - All commands go through `pwsh_transform` unconditionally — PS7+ syntax is always down-leveled.
 
 **Should we upstream?** Yes. This completes the migration P-016 started and makes Hermes a zero-dependency Windows citizen.
+
+---
+
+### P-022: Empty-content message filtering in `sanitize_api_messages`
+
+**Symptom**: Long-running sessions (e.g. Feishu 3-13h) eventually hit an API error such as MiMo's HTTP 400 `"text is not set"` or a generic OpenAI-compatible gateway rejection. The failure happens on a request that contains an `assistant` or `user` message whose `content` has been compressed/truncated to an empty string.
+
+**Root cause**: Some providers (MiMo v2.5, strict OpenAI-compatible gateways) reject messages where `content` is `""` and no tool payload is present. The agent's context compressor can leave these empty messages behind; the existing pre-call sanitizer only repaired orphaned tool results and dropped `session_meta` role messages, but did not strip empty-content assistant/user/function messages.
+
+**What the patch does**:
+
+- In `sanitize_api_messages`, after the existing orphan-repair pass, a new pass filters out messages whose role is in `{assistant, user, function}`, whose `content` is exactly `""`, and that carry no assistant payload.
+- Assistant payloads that preserve the message are:
+  - `tool_calls`
+  - `codex_reasoning_items`
+  - `codex_message_items`
+  - `reasoning_content`
+- This keeps codex/DeepSeek reasoning replay and tool-call chains intact while removing the empty messages that trigger provider-side validation errors.
+- System messages are intentionally left untouched (provider behavior varies).
+- Messages that lack a `content` key entirely are also left untouched, so the API can reject them with its own error if necessary and we don't accidentally hide other bugs.
+
+**Files touched**:
+- `agent/agent_runtime_helpers.py` — adds the empty-content filter inside `sanitize_api_messages`.
+- `tests/run_agent/test_agent_guardrails.py` — adds 11 focused regression tests covering assistant/user/function empty-content drops, preservation with tool calls / codex reasoning / reasoning content, system preservation, multiple consecutive drops, and idempotence.
+- `tests/run_agent/test_session_meta_filtering.py` — adds a dedicated `TestSanitizeApiMessagesEmptyContentFilter` class with end-to-end regression tests including the MiMo "text is not set" scenario.
+
+**Side effects**:
+- Slightly fewer messages reach the API after heavy compression; this is the desired behavior because those messages had no usable content.
+- If an upstream caller intentionally passes an empty assistant message for some protocol reason, it will now be dropped unless it carries one of the recognized payloads.
+
+**Should we upstream?** Yes. The filter is provider-agnostic, guards against a real class of gateway rejections, and is covered by extensive tests.
 
 ---
 
