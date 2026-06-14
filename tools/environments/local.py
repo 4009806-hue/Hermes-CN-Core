@@ -541,6 +541,13 @@ class LocalEnvironment(BaseEnvironment):
         # Unconditionally down-level PS7+ syntax → PS5.1.
         cmd_string, pwsh_warnings = pwsh_transform(cmd_string)
         self._pwsh_warnings = pwsh_warnings
+
+        # Force PowerShell to emit UTF-8 on stdout/stderr regardless of the
+        # system code page.  Must come AFTER pwsh_transform so the preamble
+        # itself is never mangled by the down-level pass.
+        from tools.environments.windows_env import ps_with_utf8
+        cmd_string = ps_with_utf8(cmd_string)
+
         args = [self._shell_path, "-NoP", "-Exec", "Bypass", "-NoL", "-C", cmd_string]
         run_env = _make_run_env(self.env)
         safe_cwd = _resolve_safe_cwd(self.cwd)
@@ -601,21 +608,24 @@ class LocalEnvironment(BaseEnvironment):
         # the user's command (similar to bash ``eval``).  ``$LASTEXITCODE``
         # captures the exit code of the last external command.
         parts = [
+            # Force UTF-8 output encoding for stdout/stderr.
+            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8",
+            "$OutputEncoding=[System.Text.Encoding]::UTF8",
             # Suppress errors, cd to target
-            f"$ErrorActionPreference = 'Continue'",
+            "$ErrorActionPreference = 'Continue'",
             f"Set-Location -LiteralPath '{quoted_cwd}' -ErrorAction SilentlyContinue",
             f"if ($?) {{ Set-Location -LiteralPath '{quoted_cwd}' }} else {{ exit 126 }}",
             # Run the command
             f"Invoke-Expression '{escaped}'",
-            f"$hermes_ec = $LASTEXITCODE",
+            "$hermes_ec = $LASTEXITCODE",
             # Write CWD to temp file
             f"(Get-Location).Path | Out-File -Encoding utf8 -FilePath '{quoted_cwd_file}'",
             # Emit CWD marker
-            f"$cwd = (Get-Location).Path",
-            f"Write-Output ''",
+            "$cwd = (Get-Location).Path",
+            "Write-Output ''",
             f"Write-Output '{marker}' + $cwd + '{marker}'",
             # Exit with captured code
-            f"exit $hermes_ec",
+            "exit $hermes_ec",
         ]
 
         return "\n".join(parts)
