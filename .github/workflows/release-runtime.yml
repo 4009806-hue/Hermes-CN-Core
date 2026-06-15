@@ -374,6 +374,7 @@ jobs:
           ls -la out
 
       - name: Sign manifest
+        if: false  # 跳过签名（需要配置RUNTIME_SIGN_PRIVATE_KEY_PEM secret）
         shell: bash
         env:
           RUNTIME_SIGN_PRIVATE_KEY_PEM: ${{ secrets.RUNTIME_SIGN_PRIVATE_KEY_PEM }}
