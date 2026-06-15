@@ -192,6 +192,7 @@ jobs:
             --name "$NAME" \
             --onedir \
             --console \
+            --collect-submodules agent \
             --collect-submodules hermes_cli \
             --collect-submodules tui_gateway \
             --collect-submodules fastapi \
