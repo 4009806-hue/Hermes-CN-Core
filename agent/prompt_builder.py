@@ -1057,6 +1057,37 @@ def _skill_should_show(
     return True
 
 
+
+def _build_index_only_prompt(skills_dir: Path) -> str:
+    """三层架构模式：只注入 skills/index.md 作为轻量技能地图。
+    
+    配置项 skills.inject_mode: index|full
+    - index = 只加载 skills/index.md（三层架构轻量模式）
+    - full = 当前行为，全量扫描所有SKILL.md（兼容默认）
+    """
+    index_file = skills_dir / "index.md"
+    if not index_file.exists():
+        return ""
+    try:
+        index_content = index_file.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    if not index_content:
+        return ""
+    return (
+        "## Skills (mandatory)\n"
+        "Before replying, load the skill index with skill_view(name='skills/index.md').\n"
+        "Then for the specific domain, load its index with skill_view(name='/index.md').\n"
+        "Only load the full SKILL.md when you need the detailed procedure.\n"
+        "If a skill matches, you MUST load and follow its instructions.\n"
+        "\n"
+        "\n"
+        f"{index_content}\n"
+        "\n"
+        "\n"
+        "Only proceed without loading a skill if genuinely none are relevant."
+    )
+
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
@@ -1074,7 +1105,24 @@ def build_skills_system_prompt(
     scanned alongside the local ``~/.hermes/skills/`` directory.  External dirs
     are read-only — they appear in the index but new skills are always created
     in the local dir.  Local skills take precedence when names collide.
-    """
+    """    # ── 三层架构模式：只读 index.md ────────────────────────────────
+    _cfg_path = get_config_path()
+    _inject_mode = "full"
+    if _cfg_path and _cfg_path.exists():
+        try:
+            from ruamel.yaml import YAML
+            _yaml = YAML(typ="safe")
+            _cfg = _yaml.load(_cfg_path.read_text(encoding="utf-8"))
+            _inject_mode = (_cfg.get("skills", {}).get("inject_mode") or "full").lower()
+        except Exception:
+            pass
+    if _inject_mode == "index":
+        index_result = _build_index_only_prompt(skills_dir)
+        if index_result:
+            return index_result
+        # fallback: index.md 不存在，走全量模式
+
+
     skills_dir = get_skills_dir()
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
 
