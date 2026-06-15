@@ -1127,6 +1127,40 @@ def build_skills_system_prompt(
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
 
     if not skills_dir.exists() and not external_dirs:
+    
+        # -- Three-layer architecture: inject_mode=index --
+        try:
+            from ruamel.yaml import YAML
+            _cfg_path = get_config_path()
+            if _cfg_path and _cfg_path.exists():
+                _yaml = YAML(typ="safe")
+                _cfg = _yaml.load(_cfg_path.read_text(encoding="utf-8"))
+                if (_cfg.get("skills", {}).get("inject_mode") or "full").lower() == "index":
+                    idx_file = skills_dir / "index.md"
+                    if idx_file.exists():
+                        idx_content = idx_file.read_text(encoding="utf-8").strip()
+                        if idx_content:
+                            return (
+                                "## Skills (mandatory)
+"
+                                "Before replying, load the skill index with skill_view(name='skills/index.md').
+"
+                                "Then for the specific domain, load its index with skill_view(name='<domain>/index.md').
+"
+                                "Only load the full SKILL.md when you need the detailed procedure.
+
+"
+                                "<available_skills>
+"
+                                f"{idx_content}
+"
+                                "</available_skills>
+"
+                                "Only proceed without loading a skill if genuinely none are relevant."
+                            )
+        except Exception:
+            pass
+    
         return ""
 
     # ── Layer 1: in-process LRU cache ─────────────────────────────────
